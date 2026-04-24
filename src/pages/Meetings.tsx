@@ -2,8 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import {
+  Check,
   CheckCircle,
+  Copy,
   Download,
+  EyeOff,
   Headphones,
   HelpCircle,
   Loader2,
@@ -19,6 +22,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useMeetingSession } from "@/hooks/useMeetingSession";
@@ -38,6 +42,29 @@ function asStringArray(v: unknown): string[] {
   return v.map((x) => String(x));
 }
 
+type IncognitoOutcome = {
+  title: string;
+  summary: string;
+  decisions: string[];
+  actionItems: string[];
+};
+
+function formatIncognitoCopy(o: IncognitoOutcome): string {
+  const lines = [
+    o.title,
+    "",
+    "Summary",
+    o.summary,
+    "",
+    "Decisions",
+    ...o.decisions.map((d) => `• ${d}`),
+    "",
+    "Tasks",
+    ...o.actionItems.map((t) => `• ${t}`),
+  ];
+  return lines.join("\n");
+}
+
 export default function Meetings() {
   const queryClient = useQueryClient();
   const screenRef = useRef<HTMLVideoElement>(null);
@@ -50,12 +77,17 @@ export default function Meetings() {
   const [calmPrompt, setCalmPrompt] = useState<string | null>(null);
   const [helpLoading, setHelpLoading] = useState(false);
   const [ending, setEnding] = useState(false);
+  const [incognitoMode, setIncognitoMode] = useState(false);
+  const [incognitoOutcome, setIncognitoOutcome] = useState<IncognitoOutcome | null>(null);
+  const [copiedHint, setCopiedHint] = useState<string | null>(null);
   const helpLoadingRef = useRef(false);
   helpLoadingRef.current = helpLoading;
 
   const session = useMeetingSession();
 
-  const backendOk = health?.database === "connected" && health?.ollama === "reachable";
+  const dbOk = health?.database === "connected";
+  const ollamaOk = health?.ollama === "reachable";
+  const backendOk = dbOk && ollamaOk;
 
   const meetingsQuery = useQuery({
     queryKey: ["meetings"],
@@ -70,7 +102,8 @@ export default function Meetings() {
 
   const attachStreams = useCallback(async () => {
     try {
-      const { displayStream, micStream } = await session.startSession();
+      setIncognitoOutcome(null);
+      const { displayStream, micStream } = await session.startSession({ recordMeeting: !incognitoMode });
       if (screenRef.current) {
         screenRef.current.srcObject = displayStream;
         await screenRef.current.play().catch(() => undefined);
@@ -82,11 +115,15 @@ export default function Meetings() {
       setStartedAtIso(new Date().toISOString());
       setHelpText(null);
       setCalmPrompt(null);
-      toast.success("Capture started — pick Meet tab + enable tab audio if prompted.");
+      if (incognitoMode) {
+        toast.success("Incognito capture started — nothing will be saved to the database.");
+      } else {
+        toast.success("Capture started — pick Meet tab + enable tab audio if prompted.");
+      }
     } catch {
       /* startSession sets lastError */
     }
-  }, [session]);
+  }, [session, incognitoMode]);
 
   const detachVideos = useCallback(() => {
     if (screenRef.current) screenRef.current.srcObject = null;
@@ -127,7 +164,7 @@ export default function Meetings() {
 
   const stressMonitor = useVideoStressMonitor({
     videoRef: cameraRef,
-    enabled: session.isSessionActive && backendOk,
+    enabled: session.isSessionActive && ollamaOk,
     onHighStress: () => {
       if (helpLoadingRef.current) return;
       const snippet = session.getSnippetForAi();
@@ -144,6 +181,7 @@ export default function Meetings() {
   const endSession = useCallback(async () => {
     setEnding(true);
     setHelpText(null);
+    setCalmPrompt(null);
     try {
       const { blob, transcript } = await session.stopSession();
       detachVideos();
@@ -162,42 +200,68 @@ export default function Meetings() {
           decisions = s.decisions;
           actionItems = s.actionItems;
         } catch (e) {
-          toast.error(e instanceof Error ? e.message : "Summary failed — meeting still saved.");
-          summary = "Summary could not be generated. See transcript in database.";
+          const msg = e instanceof Error ? e.message : "Summary failed.";
+          toast.error(incognitoMode ? msg : `${msg} Meeting may be saved without a good summary.`);
+          summary = incognitoMode
+            ? "Summary could not be generated. Nothing was stored."
+            : "Summary could not be generated. See transcript in database.";
         }
       } else {
         summary = "No transcript captured (speech recognition may be unavailable or silent).";
       }
 
-      try {
-        await saveMutation.mutateAsync({
+      if (incognitoMode) {
+        setIncognitoOutcome({
           title: meetingTitle,
-          startedAt,
-          endedAt,
-          transcript,
           summary,
           decisions,
           actionItems,
         });
-        toast.success("Meeting saved");
-      } catch (e) {
-        toast.error(e instanceof Error ? e.message : "Could not save to database");
-      }
+        toast.message("Incognito session ended", {
+          description: "Summary is on screen only — copy it now. No database row or recording file was kept.",
+        });
+      } else {
+        try {
+          await saveMutation.mutateAsync({
+            title: meetingTitle,
+            startedAt,
+            endedAt,
+            transcript,
+            summary,
+            decisions,
+            actionItems,
+          });
+          toast.success("Meeting saved");
+        } catch (e) {
+          toast.error(e instanceof Error ? e.message : "Could not save to database");
+        }
 
-      if (blob && blob.size > 0) {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${meetingTitle.replace(/\s+/g, "-")}-recording.webm`;
-        a.click();
-        URL.revokeObjectURL(url);
-        toast.message("Recording download started");
+        if (blob && blob.size > 0) {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `${meetingTitle.replace(/\s+/g, "-")}-recording.webm`;
+          a.click();
+          URL.revokeObjectURL(url);
+          toast.message("Recording download started");
+        }
       }
     } finally {
       setEnding(false);
       setStartedAtIso(null);
     }
-  }, [session, detachVideos, startedAtIso, meetingTitle, saveMutation]);
+  }, [session, detachVideos, startedAtIso, meetingTitle, saveMutation, incognitoMode]);
+
+  const copyToClipboard = useCallback(async (label: string, text: string, hintId: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedHint(hintId);
+      toast.success(`${label} copied`);
+      window.setTimeout(() => setCopiedHint((h) => (h === hintId ? null : h)), 2000);
+    } catch {
+      toast.error("Could not copy to clipboard");
+    }
+  }, []);
 
   const meetings: MeetingRow[] = meetingsQuery.data ?? [];
 
@@ -206,7 +270,8 @@ export default function Meetings() {
       <div>
         <h2 className="font-heading text-2xl font-bold text-foreground">Meeting Copilot</h2>
         <p className="text-sm text-muted-foreground mt-0.5">
-          Capture Meet tab video + system audio, your camera/mic, live transcript, AI help via Ollama, and saved summaries in Postgres.
+          Capture Meet tab + camera/mic, live transcript, and AI help via Ollama. <strong>Normal</strong> mode saves summaries and recordings to your setup;{" "}
+          <strong>Incognito</strong> keeps nothing in the database — you only get an on-screen summary to copy.
         </p>
       </div>
 
@@ -224,6 +289,11 @@ export default function Meetings() {
           </div>
           {!backendOk && health.databaseError && (
             <p className="text-xs mt-1 opacity-90">{health.databaseError}</p>
+          )}
+          {incognitoMode && ollamaOk && !dbOk && (
+            <p className="text-xs mt-2 opacity-90">
+              Incognito selected: Ollama is enough — the database can stay offline. Nothing from this session will be written to Postgres.
+            </p>
           )}
         </div>
       )}
@@ -260,10 +330,30 @@ export default function Meetings() {
                 ) : (
                   <Button variant="destructive" className="gap-2" disabled={ending} onClick={() => void endSession()}>
                     {ending ? <Loader2 className="h-4 w-4 animate-spin" /> : <MicOff className="h-4 w-4" />}
-                    End &amp; save
+                    {incognitoMode ? "End session" : "End & save"}
                   </Button>
                 )}
               </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-lg border border-border/60 bg-muted/35 px-3 py-3">
+              <div className="space-y-1 pr-2">
+                <Label htmlFor="incognito-mode" className="text-sm font-medium flex items-center gap-2 cursor-pointer">
+                  <EyeOff className="h-4 w-4 text-muted-foreground" />
+                  Incognito mode
+                </Label>
+                <p id="incognito-mode-desc" className="text-xs text-muted-foreground leading-relaxed">
+                  No Postgres save, no WebM download, and the in-app transcript clears when you end. Afterward you only see summary, decisions, and tasks here — copy them if needed. Live AI help still sends recent text to your API/Ollama (not stored by this app).
+                </p>
+              </div>
+              <Switch
+                id="incognito-mode"
+                checked={incognitoMode}
+                onCheckedChange={setIncognitoMode}
+                disabled={session.isSessionActive}
+                aria-describedby="incognito-mode-desc"
+                className="shrink-0"
+              />
             </div>
 
             {session.lastError && (
@@ -317,7 +407,8 @@ export default function Meetings() {
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <span className="h-2 w-2 rounded-full bg-green-500 animate-focus-pulse" />
                   <Headphones className="h-4 w-4" />
-                  Listening — transcript builds locally (Chrome speech), recording includes tab + mic audio.
+                  Listening — transcript builds locally (Chrome speech).
+                  {incognitoMode ? " Incognito: mixed tab+mic recording is off." : " Recording includes tab + mic audio."}
                 </div>
               )}
               {!session.speechSupported && (
@@ -347,7 +438,7 @@ export default function Meetings() {
               <Button
                 variant="secondary"
                 className="gap-2"
-                disabled={!session.isSessionActive || helpLoading || !backendOk}
+                disabled={!session.isSessionActive || helpLoading || !ollamaOk}
                 onClick={() => void runHelp(false)}
               >
                 {helpLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <HelpCircle className="h-4 w-4" />}
@@ -356,7 +447,7 @@ export default function Meetings() {
               <Button
                 variant="outline"
                 className="gap-2 border-nest-rose/50 text-nest-rose-foreground"
-                disabled={!session.isSessionActive || helpLoading || !backendOk}
+                disabled={!session.isSessionActive || helpLoading || !ollamaOk}
                 onClick={() => void runHelp(true)}
               >
                 <HeartPulse className="h-4 w-4" />
@@ -367,7 +458,7 @@ export default function Meetings() {
                 variant="ghost"
                 size="sm"
                 className="text-xs text-muted-foreground"
-                disabled={!session.isSessionActive || helpLoading || !backendOk}
+                disabled={!session.isSessionActive || helpLoading || !ollamaOk}
                 onClick={() => void runHelp(true)}
                 title="Manual test — same as Calm down & suggest reply. Live camera stress also triggers this when the smoothed score stays high."
               >
@@ -403,19 +494,141 @@ export default function Meetings() {
                 <strong>Transcript</strong> uses the Web Speech API in Chrome (sends audio to Google&apos;s speech service). For a fully local pipeline, swap in Whisper later.
               </p>
               <p>
-                <strong>End &amp; save</strong> calls Ollama for a structured summary, then stores everything in Postgres. The WebM file downloads automatically.
+                <strong>End &amp; save</strong> (normal mode) calls Ollama for a structured summary, then stores everything in Postgres. The WebM file downloads automatically.
+              </p>
+              <p>
+                <strong>Incognito</strong> skips the database and recording file; after you end, copy the summary from the page — then dismiss to clear it from the UI.
               </p>
               <p className="flex items-center gap-1 text-nest-mint-foreground">
                 <Download className="h-3 w-3 shrink-0" />
-                Download is the raw recording; DB holds transcript + AI summary.
+                Normal mode: download is the raw recording; DB holds transcript + AI summary.
               </p>
             </CardDescription>
           </CardHeader>
         </Card>
       </div>
 
+      {incognitoOutcome && (
+        <Card className="nest-shadow-card border-nest-purple/35 bg-card/80">
+          <CardHeader className="pb-2">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <CardTitle className="font-heading text-lg flex items-center gap-2">
+                  <EyeOff className="h-5 w-5 text-nest-purple" />
+                  Incognito summary
+                </CardTitle>
+                <CardDescription className="mt-1">
+                  Not saved anywhere in this app. Copy what you need, then dismiss — this panel only lives in your browser tab.
+                </CardDescription>
+                <p className="text-sm font-medium text-foreground mt-2">{incognitoOutcome.title}</p>
+              </div>
+              <div className="flex flex-wrap gap-2 shrink-0">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className="gap-1.5"
+                  onClick={() => void copyToClipboard("Summary bundle", formatIncognitoCopy(incognitoOutcome), "all")}
+                >
+                  {copiedHint === "all" ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                  Copy all
+                </Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => setIncognitoOutcome(null)}>
+                  Dismiss
+                </Button>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="rounded-lg border border-border/50 bg-background/60 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Summary</span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs gap-1"
+                  onClick={() => void copyToClipboard("Summary", incognitoOutcome.summary, "summary")}
+                >
+                  {copiedHint === "summary" ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                  Copy
+                </Button>
+              </div>
+              <p className="text-sm text-foreground whitespace-pre-wrap">{incognitoOutcome.summary}</p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="rounded-lg border border-border/50 bg-background/60 p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-primary">Decisions</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs gap-1"
+                    onClick={() =>
+                      void copyToClipboard(
+                        "Decisions",
+                        incognitoOutcome.decisions.map((d) => `• ${d}`).join("\n") || "—",
+                        "decisions"
+                      )
+                    }
+                  >
+                    {copiedHint === "decisions" ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                    Copy
+                  </Button>
+                </div>
+                {incognitoOutcome.decisions.length ? (
+                  incognitoOutcome.decisions.map((d, j) => (
+                    <div key={j} className="flex items-center gap-2 text-xs text-foreground">
+                      <CheckCircle className="h-3 w-3 text-primary shrink-0" />
+                      {d}
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-xs text-muted-foreground">None listed</p>
+                )}
+              </div>
+              <div className="rounded-lg border border-border/50 bg-background/60 p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-nest-purple">Tasks</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs gap-1"
+                    onClick={() =>
+                      void copyToClipboard(
+                        "Tasks",
+                        incognitoOutcome.actionItems.map((t) => `• ${t}`).join("\n") || "—",
+                        "tasks"
+                      )
+                    }
+                  >
+                    {copiedHint === "tasks" ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                    Copy
+                  </Button>
+                </div>
+                {incognitoOutcome.actionItems.length ? (
+                  incognitoOutcome.actionItems.map((t, j) => (
+                    <div key={j} className="flex items-center gap-2 text-xs text-foreground">
+                      <Zap className="h-3 w-3 text-nest-purple shrink-0" />
+                      {t}
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-xs text-muted-foreground">None listed</p>
+                )}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       <div>
         <h3 className="font-heading font-semibold text-foreground mb-4">Saved meetings</h3>
+        <p className="text-xs text-muted-foreground mb-3">
+          Only <strong>normal</strong> sessions appear here. Incognito summaries are never stored in the database.
+        </p>
         {meetingsQuery.isLoading && (
           <p className="text-sm text-muted-foreground flex items-center gap-2">
             <Loader2 className="h-4 w-4 animate-spin" /> Loading…

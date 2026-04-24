@@ -28,6 +28,11 @@ function pickRecorderMime(): string {
   return "";
 }
 
+export type StartSessionOptions = {
+  /** When false (e.g. incognito), no mixed recording is captured — less confidential audio retained in memory. */
+  recordMeeting?: boolean;
+};
+
 export function useMeetingSession() {
   const displayStreamRef = useRef<MediaStream | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
@@ -108,7 +113,9 @@ export function useMeetingSession() {
     }
   }, [appendFinal]);
 
-  const startSession = useCallback(async () => {
+  const startSession = useCallback(async (options?: StartSessionOptions) => {
+    const recordMeeting = options?.recordMeeting !== false;
+
     setLastError(null);
     transcriptRef.current = "";
     setTranscript("");
@@ -139,39 +146,46 @@ export function useMeetingSession() {
     displayStreamRef.current = display;
     micStreamRef.current = mic;
 
-    const ctx = new AudioContext();
-    audioContextRef.current = ctx;
-    const dest = ctx.createMediaStreamDestination();
+    if (recordMeeting) {
+      const ctx = new AudioContext();
+      audioContextRef.current = ctx;
+      const dest = ctx.createMediaStreamDestination();
 
-    const dAudio = display.getAudioTracks();
-    if (dAudio.length) {
-      try {
-        ctx.createMediaStreamSource(new MediaStream(dAudio)).connect(dest);
-      } catch {
-        /* ignore */
+      const dAudio = display.getAudioTracks();
+      if (dAudio.length) {
+        try {
+          ctx.createMediaStreamSource(new MediaStream(dAudio)).connect(dest);
+        } catch {
+          /* ignore */
+        }
       }
-    }
-    const mAudio = mic.getAudioTracks();
-    if (mAudio.length) {
-      try {
-        ctx.createMediaStreamSource(new MediaStream(mAudio)).connect(dest);
-      } catch {
-        /* ignore */
+      const mAudio = mic.getAudioTracks();
+      if (mAudio.length) {
+        try {
+          ctx.createMediaStreamSource(new MediaStream(mAudio)).connect(dest);
+        } catch {
+          /* ignore */
+        }
       }
+
+      const videoTracks = display.getVideoTracks();
+      const merged = new MediaStream([...videoTracks, ...dest.stream.getAudioTracks()]);
+      mergedStreamRef.current = merged;
+
+      chunksRef.current = [];
+      const mime = pickRecorderMime();
+      const rec = mime ? new MediaRecorder(merged, { mimeType: mime }) : new MediaRecorder(merged);
+      recorderRef.current = rec;
+      rec.ondataavailable = (e) => {
+        if (e.data.size) chunksRef.current.push(e.data);
+      };
+      rec.start(1000);
+    } else {
+      audioContextRef.current = null;
+      mergedStreamRef.current = null;
+      recorderRef.current = null;
+      chunksRef.current = [];
     }
-
-    const videoTracks = display.getVideoTracks();
-    const merged = new MediaStream([...videoTracks, ...dest.stream.getAudioTracks()]);
-    mergedStreamRef.current = merged;
-
-    chunksRef.current = [];
-    const mime = pickRecorderMime();
-    const rec = mime ? new MediaRecorder(merged, { mimeType: mime }) : new MediaRecorder(merged);
-    recorderRef.current = rec;
-    rec.ondataavailable = (e) => {
-      if (e.data.size) chunksRef.current.push(e.data);
-    };
-    rec.start(1000);
 
     sessionActiveRef.current = true;
     setIsSessionActive(true);
@@ -221,6 +235,8 @@ export function useMeetingSession() {
 
     setIsSessionActive(false);
     const text = transcriptRef.current;
+    transcriptRef.current = "";
+    setTranscript("");
     return { blob, transcript: text };
   }, [stopSpeech]);
 
