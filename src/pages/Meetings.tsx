@@ -22,6 +22,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useMeetingSession } from "@/hooks/useMeetingSession";
+import { useVideoStressMonitor } from "@/hooks/useVideoStressMonitor";
 import {
   apiHealth,
   getMeetings,
@@ -49,8 +50,12 @@ export default function Meetings() {
   const [calmPrompt, setCalmPrompt] = useState<string | null>(null);
   const [helpLoading, setHelpLoading] = useState(false);
   const [ending, setEnding] = useState(false);
+  const helpLoadingRef = useRef(false);
+  helpLoadingRef.current = helpLoading;
 
   const session = useMeetingSession();
+
+  const backendOk = health?.database === "connected" && health?.ollama === "reachable";
 
   const meetingsQuery = useQuery({
     queryKey: ["meetings"],
@@ -117,6 +122,20 @@ export default function Meetings() {
     [session]
   );
 
+  const runHelpRef = useRef(runHelp);
+  runHelpRef.current = runHelp;
+
+  const stressMonitor = useVideoStressMonitor({
+    videoRef: cameraRef,
+    enabled: session.isSessionActive && backendOk,
+    onHighStress: () => {
+      if (helpLoadingRef.current) return;
+      const snippet = session.getSnippetForAi();
+      if (!snippet.trim()) return;
+      void runHelpRef.current(true);
+    },
+  });
+
   const saveMutation = useMutation({
     mutationFn: saveMeeting,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["meetings"] }),
@@ -182,8 +201,6 @@ export default function Meetings() {
 
   const meetings: MeetingRow[] = meetingsQuery.data ?? [];
 
-  const backendOk = health?.database === "connected" && health?.ollama === "reachable";
-
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       <div>
@@ -219,7 +236,7 @@ export default function Meetings() {
               Live capture
             </CardTitle>
             <CardDescription>
-              Start → choose the Google Meet <strong>Chrome tab</strong> and enable <strong>Share tab audio</strong>. Camera is for your preview (plug in a mood model later to trigger calm mode automatically).
+              Start → choose the Google Meet <strong>Chrome tab</strong> and enable <strong>Share tab audio</strong>. Your camera preview runs a local mood estimate (face expressions → stress score, smoothed). When stress stays above the threshold, <strong>Calm down &amp; suggest reply</strong> runs automatically if there is transcript.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -265,6 +282,33 @@ export default function Meetings() {
                 <span className="absolute bottom-2 left-2 text-[10px] uppercase tracking-wider bg-black/60 text-white px-2 py-0.5 rounded-md flex items-center gap-1">
                   <Video className="h-3 w-3" /> You
                 </span>
+                {session.isSessionActive && (
+                  <div className="absolute top-2 right-2 max-w-[min(100%,14rem)] text-right space-y-1">
+                    {stressMonitor.loadError ? (
+                      <span className="inline-block text-[10px] leading-tight text-amber-200 bg-black/65 px-2 py-1 rounded-md">
+                        Mood models failed to load (offline?). Calm auto-trigger disabled.
+                      </span>
+                    ) : !stressMonitor.modelsReady ? (
+                      <span className="inline-flex items-center gap-1 text-[10px] text-white/90 bg-black/65 px-2 py-1 rounded-md">
+                        <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                        Loading mood models…
+                      </span>
+                    ) : stressMonitor.avgStress != null ? (
+                      <span
+                        className={`inline-block text-[10px] font-semibold tabular-nums px-2 py-1 rounded-md bg-black/70 ${
+                          stressMonitor.isHighStress ? "text-red-300" : "text-emerald-300"
+                        }`}
+                      >
+                        Stress (est.): {stressMonitor.avgStress.toFixed(2)}
+                        {stressMonitor.isHighStress ? " · High" : ""}
+                      </span>
+                    ) : (
+                      <span className="inline-block text-[10px] text-white/85 bg-black/65 px-2 py-1 rounded-md">
+                        Face the camera for a reading…
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -325,7 +369,7 @@ export default function Meetings() {
                 className="text-xs text-muted-foreground"
                 disabled={!session.isSessionActive || helpLoading || !backendOk}
                 onClick={() => void runHelp(true)}
-                title="Same as Calm — wire your video mood model to call runHelp(true) automatically when stress is detected."
+                title="Manual test — same as Calm down & suggest reply. Live camera stress also triggers this when the smoothed score stays high."
               >
                 Demo: stress trigger
               </Button>
