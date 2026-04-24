@@ -84,3 +84,14 @@ export async function saveMeeting(body: {
   }
   return r.json();
 }
+
+export async function deleteMeeting(id: string): Promise<{ ok: boolean }> {
+  const r = await fetch(`/api/meetings/${id}`, {
+    method: "DELETE",
+  });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new Error((j as { error?: string }).error || r.statusText);
+  }
+  return r.json();
+}

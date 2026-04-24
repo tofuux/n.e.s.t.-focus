@@ -155,6 +155,17 @@ app.get("/api/meetings/:id", async (req, res) => {
   }
 });
 
+app.delete("/api/meetings/:id", async (req, res) => {
+  if (!pool) return res.status(503).json({ error: "database not configured" });
+  try {
+    const { rowCount } = await pool.query(`DELETE FROM meetings WHERE id = $1`, [req.params.id]);
+    if (!rowCount) return res.status(404).json({ error: "not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/meetings", async (req, res) => {
   if (!pool) return res.status(503).json({ error: "database not configured" });
   const title = String(req.body?.title || "Meeting").slice(0, 200);
