@@ -22,18 +22,21 @@ export type UseVideoStressMonitorOptions = {
 export function useVideoStressMonitor({
   videoRef,
   enabled,
-  stressThreshold = 0.6,
+  stressThreshold = 0.3,
   windowSize = 10,
-  sampleIntervalMs = 750,
+  sampleIntervalMs = 1600,
   minSamplesForTrigger = 5,
   cooldownMs = 75_000,
   onHighStress,
 }: UseVideoStressMonitorOptions) {
   const [modelsReady, setModelsReady] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [avgStress, setAvgStress] = useState<number | null>(null);
-  const [lastFrameStress, setLastFrameStress] = useState<number | null>(null);
-  const [windowLen, setWindowLen] = useState(0);
+  /** One state blob per tick to avoid multiple React commits competing with video + speech. */
+  const [stressDisplay, setStressDisplay] = useState<{
+    avgStress: number | null;
+    lastFrameStress: number | null;
+    windowLen: number;
+  }>({ avgStress: null, lastFrameStress: null, windowLen: 0 });
 
   const stressWindowRef = useRef<number[]>([]);
   const lastTriggerRef = useRef(0);
@@ -68,9 +71,7 @@ export function useVideoStressMonitor({
 
   useEffect(() => {
     stressWindowRef.current = [];
-    setAvgStress(null);
-    setLastFrameStress(null);
-    setWindowLen(0);
+    setStressDisplay({ avgStress: null, lastFrameStress: null, windowLen: 0 });
     lastTriggerRef.current = 0;
   }, [enabled]);
 
@@ -82,8 +83,8 @@ export function useVideoStressMonitor({
     if (!faceapi) return;
 
     const detectorOpts = new faceapi.TinyFaceDetectorOptions({
-      inputSize: 320,
-      scoreThreshold: 0.45,
+      inputSize: 224,
+      scoreThreshold: 0.5,
     });
 
     const tick = async () => {
@@ -102,9 +103,7 @@ export function useVideoStressMonitor({
         if (w.length > windowSize) w.shift();
 
         const avg = mean(w);
-        setLastFrameStress(stress);
-        setAvgStress(avg);
-        setWindowLen(w.length);
+        setStressDisplay({ avgStress: avg, lastFrameStress: stress, windowLen: w.length });
 
         const now = Date.now();
         if (
@@ -135,6 +134,7 @@ export function useVideoStressMonitor({
     cooldownMs,
   ]);
 
+  const { avgStress, lastFrameStress, windowLen } = stressDisplay;
   const isHigh =
     avgStress !== null &&
     avgStress > stressThreshold &&

@@ -47,15 +47,143 @@ async function ollamaChat(messages) {
   return data.message?.content?.trim() || "";
 }
 
-function tryParseJsonObject(text) {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) return null;
-  try {
-    return JSON.parse(text.slice(start, end + 1));
-  } catch {
-    return null;
+function stripMarkdownCodeFence(text) {
+  let t = String(text).trim();
+  const fence = /^```(?:json)?\s*([\s\S]*?)```$/im;
+  const m = t.match(fence);
+  if (m) t = m[1].trim();
+  return t.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+}
+
+/** Parse first `{ ... }` using brace depth so strings / nested arrays don't break lastIndexOf("}"). */
+function tryParseBalancedJson(text) {
+  const s = String(text);
+  const start = s.indexOf("{");
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (inString) {
+      if (c === "\\") {
+        escape = true;
+        continue;
+      }
+      if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      continue;
+    }
+    if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) {
+        try {
+          return JSON.parse(s.slice(start, i + 1));
+        } catch {
+          return null;
+        }
+      }
+    }
   }
+  return null;
+}
+
+function unescapeJsonStringContent(inner) {
+  return inner.replace(/\\(.)/g, (_, c) => {
+    if (c === "n") return "\n";
+    if (c === "r") return "\r";
+    if (c === "t") return "\t";
+    if (c === '"') return '"';
+    if (c === "\\") return "\\";
+    return c;
+  });
+}
+
+/** When the model returns truncated or noisy JSON, still pull a readable summary. */
+function extractSummaryStringFallback(raw) {
+  const s = String(raw);
+  const m = s.match(/"summary"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (m) return unescapeJsonStringContent(m[1]);
+  const m2 = s.match(/"summary"\s*:\s*'([^']*)'/);
+  if (m2) return m2[1];
+  return null;
+}
+
+function extractStringArrayField(raw, key) {
+  const re = new RegExp(`"${key}"\\s*:\\s*\\[([\\s\\S]*?)\\]`, "m");
+  const m = String(raw).match(re);
+  if (!m) return null;
+  const inner = m[1].trim();
+  if (!inner) return [];
+  try {
+    const parsed = JSON.parse(`[${inner}]`);
+    return Array.isArray(parsed) ? parsed.map(String) : null;
+  } catch {
+    const items = [];
+    const strRe = /"((?:[^"\\]|\\.)*)"/g;
+    let sm;
+    while ((sm = strRe.exec(inner)) !== null) items.push(sm[1].replace(/\\"/g, '"'));
+    return items.length ? items : [];
+  }
+}
+
+function normalizeMeetingPayload(parsed) {
+  if (!parsed || typeof parsed !== "object") return null;
+  const summary =
+    typeof parsed.summary === "string"
+      ? parsed.summary
+      : typeof parsed.Summary === "string"
+        ? parsed.Summary
+        : null;
+  const decisionsRaw = parsed.decisions ?? parsed.Decisions;
+  const actionsRaw = parsed.actionItems ?? parsed.action_items ?? parsed.ActionItems ?? parsed.tasks;
+  const decisions = Array.isArray(decisionsRaw) ? decisionsRaw.map(String) : [];
+  const actionItems = Array.isArray(actionsRaw) ? actionsRaw.map(String) : [];
+  if (summary != null) return { summary, decisions, actionItems };
+  return null;
+}
+
+function parseMeetingSummaryResponse(raw) {
+  const cleaned = stripMarkdownCodeFence(raw);
+  if (!/^\s*\{/.test(cleaned) && cleaned.length > 0) {
+    return { summary: cleaned.slice(0, 4000), decisions: [], actionItems: [] };
+  }
+
+  const parsed =
+    tryParseBalancedJson(cleaned) ||
+    (() => {
+      try {
+        return JSON.parse(cleaned);
+      } catch {
+        return null;
+      }
+    })();
+
+  const norm = normalizeMeetingPayload(parsed);
+  if (norm) return norm;
+
+  const summaryFromRegex = extractSummaryStringFallback(cleaned);
+  if (summaryFromRegex) {
+    const decisions = extractStringArrayField(cleaned, "decisions") ?? [];
+    const actionItems =
+      extractStringArrayField(cleaned, "actionItems") ?? extractStringArrayField(cleaned, "action_items") ?? [];
+    return { summary: summaryFromRegex, decisions, actionItems };
+  }
+
+  return {
+    summary:
+      "The model response could not be parsed as structured JSON. Try ending the session again or use a smaller transcript.",
+    decisions: [],
+    actionItems: [],
+  };
 }
 
 app.get("/api/health", async (_req, res) => {
@@ -107,23 +235,22 @@ app.post("/api/ai/summarize", async (req, res) => {
     return res.status(400).json({ error: "transcript is empty" });
   }
   try {
-    const prompt = `You summarize a meeting for one attendee. Return ONLY valid JSON with this shape (no markdown):
-{"summary":"2-4 sentences","decisions":["..."],"actionItems":["..."]}
+    const prompt = `You summarize a meeting for one attendee. Reply with ONE JSON object only (no markdown fences, no commentary before or after).
+Use exactly these keys: summary (string, 2-4 sentences), decisions (JSON array of strings), actionItems (JSON array of strings).
+Escape any double quotes inside summary as \\".
+Example: {"summary":"...","decisions":[],"actionItems":[]}
 Transcript:\n---\n${transcript}\n---`;
 
     const raw = await ollamaChat([
       {
         role: "system",
         content:
-          "You output only compact JSON. Keys: summary (string), decisions (array of strings), actionItems (array of strings). No extra keys.",
+          "Output only a single valid JSON object. Keys: summary (string), decisions (array of strings), actionItems (array of strings). No markdown, no trailing commas, complete closing braces.",
       },
       { role: "user", content: prompt },
     ]);
 
-    const parsed = tryParseJsonObject(raw);
-    const summary = typeof parsed?.summary === "string" ? parsed.summary : raw.slice(0, 2000);
-    const decisions = Array.isArray(parsed?.decisions) ? parsed.decisions.map(String) : [];
-    const actionItems = Array.isArray(parsed?.actionItems) ? parsed.actionItems.map(String) : [];
+    const { summary, decisions, actionItems } = parseMeetingSummaryResponse(raw);
 
     res.json({ summary, decisions, actionItems });
   } catch (e) {

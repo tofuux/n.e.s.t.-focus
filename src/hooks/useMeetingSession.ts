@@ -46,6 +46,8 @@ export function useMeetingSession() {
   const transcriptRef = useRef("");
   const [transcript, setTranscript] = useState("");
   const [interim, setInterim] = useState("");
+  const interimThrottleRef = useRef<number | null>(null);
+  const latestInterimRef = useRef("");
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(true);
   const [lastError, setLastError] = useState<string | null>(null);
@@ -90,19 +92,41 @@ export function useMeetingSession() {
         if (res.isFinal) finalText += chunk;
         else interimText += chunk;
       }
-      if (finalText) appendFinal(finalText);
-      setInterim(interimText.trim());
+      if (finalText) {
+        if (interimThrottleRef.current != null) {
+          window.clearTimeout(interimThrottleRef.current);
+          interimThrottleRef.current = null;
+        }
+        latestInterimRef.current = "";
+        appendFinal(finalText);
+        setInterim("");
+        return;
+      }
+      latestInterimRef.current = interimText.trim();
+      if (interimThrottleRef.current != null) window.clearTimeout(interimThrottleRef.current);
+      interimThrottleRef.current = window.setTimeout(() => {
+        interimThrottleRef.current = null;
+        setInterim(latestInterimRef.current);
+      }, 110);
     };
     recognition.onerror = () => {
+      if (interimThrottleRef.current != null) {
+        window.clearTimeout(interimThrottleRef.current);
+        interimThrottleRef.current = null;
+      }
+      latestInterimRef.current = "";
       setInterim("");
     };
     recognition.onend = () => {
       if (sessionActiveRef.current && recognitionRef.current === recognition) {
-        try {
-          recognition.start();
-        } catch {
-          /* ignore */
-        }
+        window.setTimeout(() => {
+          if (!sessionActiveRef.current || recognitionRef.current !== recognition) return;
+          try {
+            recognition.start();
+          } catch {
+            /* ignore */
+          }
+        }, 120);
       }
     };
     recognitionRef.current = recognition;
@@ -149,6 +173,11 @@ export function useMeetingSession() {
     if (recordMeeting) {
       const ctx = new AudioContext();
       audioContextRef.current = ctx;
+      try {
+        await ctx.resume();
+      } catch {
+        /* ignore */
+      }
       const dest = ctx.createMediaStreamDestination();
 
       const dAudio = display.getAudioTracks();
@@ -179,7 +208,8 @@ export function useMeetingSession() {
       rec.ondataavailable = (e) => {
         if (e.data.size) chunksRef.current.push(e.data);
       };
-      rec.start(1000);
+      /* Larger timeslice = fewer main-thread churn events while recording (smoother tab + speech). */
+      rec.start(4000);
     } else {
       audioContextRef.current = null;
       mergedStreamRef.current = null;
@@ -197,6 +227,11 @@ export function useMeetingSession() {
   const stopSession = useCallback(async () => {
     sessionActiveRef.current = false;
     stopSpeech();
+    if (interimThrottleRef.current != null) {
+      window.clearTimeout(interimThrottleRef.current);
+      interimThrottleRef.current = null;
+    }
+    latestInterimRef.current = "";
     setInterim("");
 
     const rec = recorderRef.current;
