@@ -25,6 +25,24 @@ interface DerivedTask {
   source: "action" | "decision";
 }
 
+const DEMO_MEETING_ID = "demo-showcase";
+
+const demoMeeting = {
+  id: DEMO_MEETING_ID,
+  title: "Demo",
+  started_at: new Date().toISOString(),
+  summary:
+    "Team aligned on launch narrative, prioritized a crisp user story for judges, and agreed on a confident close with measurable impact.",
+};
+
+const demoTasks: DerivedTask[] = [
+  { id: "demo-a-1", text: "Open with a 30-second problem statement and one emotional user story", done: true, source: "action" },
+  { id: "demo-a-2", text: "Show live meeting capture + AI Help in under 60 seconds", done: false, source: "action" },
+  { id: "demo-a-3", text: "Present generated summary with 3 concrete next steps", done: false, source: "action" },
+  { id: "demo-d-1", text: "Position product as a calm, in-the-moment communication copilot", done: true, source: "decision" },
+  { id: "demo-d-2", text: "End with clear impact metrics: time saved and confidence improved", done: false, source: "decision" },
+];
+
 function asStringArray(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
   return v.map((item) => String(item));
@@ -49,7 +67,7 @@ function buildTasks(meeting: MeetingRow | null): DerivedTask[] {
 
 export default function Tasks() {
   const queryClient = useQueryClient();
-  const [selectedMeetingId, setSelectedMeetingId] = useState<string>("");
+  const [selectedMeetingId, setSelectedMeetingId] = useState<string>(DEMO_MEETING_ID);
   const [taskStates, setTaskStates] = useState<Record<string, boolean>>({});
 
   const meetingsQuery = useQuery({
@@ -60,27 +78,38 @@ export default function Tasks() {
   const meetings = meetingsQuery.data ?? [];
 
   useEffect(() => {
-    if (!meetings.length) {
-      setSelectedMeetingId("");
+    if (selectedMeetingId === DEMO_MEETING_ID) {
       return;
     }
-    if (!selectedMeetingId || !meetings.some((m) => m.id === selectedMeetingId)) {
+    if (!meetings.length) {
+      setSelectedMeetingId(DEMO_MEETING_ID);
+      return;
+    }
+    if (!meetings.some((m) => m.id === selectedMeetingId)) {
       setSelectedMeetingId(meetings[0].id);
     }
   }, [meetings, selectedMeetingId]);
 
+  const isDemoSelected = selectedMeetingId === DEMO_MEETING_ID;
+
   const selectedMeeting = useMemo(
-    () => meetings.find((m) => m.id === selectedMeetingId) ?? null,
-    [meetings, selectedMeetingId]
+    () => (isDemoSelected ? null : meetings.find((m) => m.id === selectedMeetingId) ?? null),
+    [isDemoSelected, meetings, selectedMeetingId]
   );
 
   const tasks = useMemo(() => {
+    if (isDemoSelected) {
+      return demoTasks.map((task) => ({
+        ...task,
+        done: taskStates[task.id] ?? task.done,
+      }));
+    }
     const base = buildTasks(selectedMeeting);
     return base.map((task) => ({
       ...task,
       done: taskStates[task.id] ?? task.done,
     }));
-  }, [selectedMeeting, taskStates]);
+  }, [isDemoSelected, selectedMeeting, taskStates]);
 
   const totalSteps = tasks.length;
   const doneSteps = tasks.filter((task) => task.done).length;
@@ -122,6 +151,7 @@ export default function Tasks() {
                 <SelectValue placeholder={meetingsQuery.isLoading ? "Loading meetings..." : "Select a meeting"} />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value={DEMO_MEETING_ID}>Product Launch Sync</SelectItem>
                 {meetings.map((meeting) => (
                   <SelectItem key={meeting.id} value={meeting.id}>
                     {meeting.title} - {format(new Date(meeting.started_at), "MMM d, HH:mm")}
@@ -156,7 +186,11 @@ export default function Tasks() {
           )}
         </div>
 
-        {selectedMeeting && (
+        {isDemoSelected ? (
+          <div className="rounded-xl border border-border/50 bg-background/60 p-3">
+            <p className="text-sm text-foreground">{demoMeeting.summary}</p>
+          </div>
+        ) : selectedMeeting && (
           <div className="rounded-xl border border-border/50 bg-background/60 p-3">
             <p className="text-sm text-foreground">{selectedMeeting.summary || "No summary available for this meeting."}</p>
           </div>
@@ -197,7 +231,9 @@ export default function Tasks() {
       {!meetingsQuery.isLoading && selectedMeeting && !tasks.length && (
         <p className="text-sm text-muted-foreground">This meeting has no tasks/decisions saved yet.</p>
       )}
-      {!meetingsQuery.isLoading && !selectedMeeting && <p className="text-sm text-muted-foreground">No meetings found. End and save a meeting first.</p>}
+      {!meetingsQuery.isLoading && !selectedMeeting && !isDemoSelected && (
+        <p className="text-sm text-muted-foreground">No meetings found. End and save a meeting first.</p>
+      )}
 
       {!!tasks.length && (
         <div className="space-y-2">
