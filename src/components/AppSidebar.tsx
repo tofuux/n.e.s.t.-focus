@@ -1,4 +1,4 @@
-import { LayoutDashboard, Video, CheckSquare, BarChart3, Brain } from "lucide-react";
+import { LayoutDashboard, Video, CheckSquare, BarChart3 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
 import {
@@ -28,17 +28,11 @@ export function AppSidebar() {
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader className="p-4">
-        <div className="flex items-center gap-2.5">
-          <div className="h-9 w-9 rounded-xl nest-gradient-primary flex items-center justify-center flex-shrink-0">
-            <Brain className="h-5 w-5 text-primary-foreground" />
-          </div>
-          {!collapsed && (
-            <div>
-              <h1 className="font-heading text-lg font-bold text-foreground tracking-tight">N.E.S.T</h1>
-              <p className="text-[10px] text-muted-foreground leading-none">Neuro Emotional Support</p>
-            </div>
-          )}
-        </div>
+        {collapsed ? (
+          <img src="/logo.png" alt="N.E.S.T icon" className="h-9 w-9 rounded-xl object-cover" />
+        ) : (
+          <img src="/logo_name.png" alt="N.E.S.T Neuro Emotional Support" className="w-full h-auto object-contain" />
+        )}
       </SidebarHeader>
       <SidebarContent className="px-2">
         <SidebarGroup>
