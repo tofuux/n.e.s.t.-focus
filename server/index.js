@@ -216,23 +216,65 @@ app.get("/api/health", async (_req, res) => {
   });
 });
 
+const DOCUMENT_PREPARE_IN_MAX = 120_000;
+const DOCUMENT_PREPARE_OUT_MAX = 7500;
+const HELP_DOC_CONTEXT_MAX = 12_000;
+
+app.post("/api/ai/prepare-document", async (req, res) => {
+  const raw = String(req.body?.text || "").slice(0, DOCUMENT_PREPARE_IN_MAX);
+  const fileName = String(req.body?.fileName || "document").slice(0, 240);
+  if (!raw.trim()) {
+    return res.status(400).json({ error: "text is empty" });
+  }
+  try {
+    const system =
+      "You create dense REFERENCE NOTES for a live meeting copilot. The copilot will not see the full document again—only your notes plus a live speech transcript. Capture what the user might ask about: topic, key facts, figures, dates, names, obligations, definitions, section or clause references, important lists. Format as plain text: one short title line, then bullet points. No fluff, no repetition, no preamble or closing. Prefer brevity; stay under 3500 words and much shorter when the source is simple.";
+    const user = `File name: ${fileName}\n\nDocument text (may be partial):\n---\n${raw}\n---\n\nOutput the notes only.`;
+    const context = await ollamaChat([
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ]);
+    const trimmed = String(context || "").trim().slice(0, DOCUMENT_PREPARE_OUT_MAX);
+    if (!trimmed) {
+      return res.status(502).json({ error: "Model returned empty notes" });
+    }
+    res.json({ context: trimmed });
+  } catch (e) {
+    res.status(502).json({ error: httpErrorMessage(e) || "Ollama request failed" });
+  }
+});
+
 app.post("/api/ai/help", async (req, res) => {
   const transcript = String(req.body?.transcript || "").slice(-12000);
   const calmMode = Boolean(req.body?.calmMode);
+  const documentContext = String(req.body?.documentContext || "").slice(0, HELP_DOC_CONTEXT_MAX);
+  const documentName = String(req.body?.documentName || "Reference document").slice(0, 240);
+  const hasDoc = documentContext.trim().length > 0;
+
   if (!transcript.trim()) {
     return res.status(400).json({ error: "transcript is empty — wait for speech or type context." });
   }
   try {
     const system = calmMode
-      ? "You are a supportive meeting coach. The user may feel stressed. Give a short calming note (1-2 sentences), then suggest one concise reply they can say next (one sentence in quotes). Use plain language."
-      : "You are a concise meeting copilot. From the recent transcript, suggest what the user could say next: one clear sentence they can speak aloud, plus a brief reason (one line). If unclear, ask one clarifying question they could use.";
+      ? hasDoc
+        ? "You are a supportive meeting coach. The user may feel stressed. They prepared brief notes from a reference PDF before the meeting (below). Give a short calming note (1-2 sentences), then suggest one concise reply they can say next (one sentence in quotes). When the transcript asks about the document, ground your reply in those notes; otherwise keep it general. Use plain language."
+        : "You are a supportive meeting coach. The user may feel stressed. Give a short calming note (1-2 sentences), then suggest one concise reply they can say next (one sentence in quotes). Use plain language."
+      : hasDoc
+        ? "You are a concise meeting copilot. The user has pre-summarized notes from a reference PDF (below) and a live meeting transcript. When they ask about the document, answer from those notes. For general meeting flow, suggest what they could say next: one clear sentence they can speak aloud, plus a brief reason (one line). If something is unclear, ask one clarifying question they could use."
+        : "You are a concise meeting copilot. From the recent transcript, suggest what the user could say next: one clear sentence they can speak aloud, plus a brief reason (one line). If unclear, ask one clarifying question they could use.";
+
+    let userContent = "";
+    if (hasDoc) {
+      userContent += `Reference document "${documentName}" (prepared notes; not the full PDF):\n---\n${documentContext}\n---\n\n`;
+    }
+    userContent += `Recent meeting transcript (may be partial):\n---\n${transcript}\n---\n\n`;
+    userContent += calmMode
+      ? "Help the user with what to say next, using the transcript and the reference document when relevant."
+      : "What should I say or answer next? Use the document when the user asks about it or when the discussion clearly relates to it.";
 
     const content = await ollamaChat([
       { role: "system", content: system },
-      {
-        role: "user",
-        content: `Recent meeting transcript (may be partial):\n---\n${transcript}\n---\nWhat should I say next?`,
-      },
+      { role: "user", content: userContent },
     ]);
     res.json({ suggestion: content });
   } catch (e) {

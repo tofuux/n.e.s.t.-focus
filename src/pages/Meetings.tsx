@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import {
@@ -17,6 +17,7 @@ import {
   Zap,
   FileText,
   HeartPulse,
+  Upload,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -30,11 +31,15 @@ import {
   apiHealth,
   getMeetings,
   postHelp,
+  postPrepareDocument,
   postSummarize,
   saveMeeting,
   type MeetingRow,
 } from "@/lib/api";
+import { extractPdfTextFromFile } from "@/lib/extractPdfText";
 import { toast } from "sonner";
+
+const HELP_DOCUMENT_SEND_MAX = 12_000;
 
 function asStringArray(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
@@ -78,10 +83,22 @@ export default function Meetings() {
   const [incognitoMode, setIncognitoMode] = useState(false);
   const [incognitoOutcome, setIncognitoOutcome] = useState<IncognitoOutcome | null>(null);
   const [copiedHint, setCopiedHint] = useState<string | null>(null);
+  /** Dense notes from one-time Ollama pass (not raw PDF). */
+  const [documentBrief, setDocumentBrief] = useState("");
+  const [documentFileName, setDocumentFileName] = useState<string | null>(null);
+  const [documentPrepareBusy, setDocumentPrepareBusy] = useState(false);
+  const [documentPrepareLabel, setDocumentPrepareLabel] = useState("");
+  const pdfInputRef = useRef<HTMLInputElement>(null);
   const helpLoadingRef = useRef(false);
   helpLoadingRef.current = helpLoading;
 
   const session = useMeetingSession();
+
+  useEffect(() => {
+    if (!incognitoMode) return;
+    setDocumentBrief("");
+    setDocumentFileName(null);
+  }, [incognitoMode]);
 
   const dbOk = health?.database === "connected";
   const ollamaOk = health?.ollama === "reachable";
@@ -135,7 +152,11 @@ export default function Meetings() {
       setHelpLoading(true);
       setCalmPrompt(null);
       try {
-        const { suggestion } = await postHelp(snippet, calmMode);
+        const docText = !incognitoMode && documentBrief.trim() ? documentBrief.slice(0, HELP_DOCUMENT_SEND_MAX) : "";
+        const { suggestion } = await postHelp(snippet, calmMode, {
+          documentContext: docText || undefined,
+          documentName: documentFileName ?? undefined,
+        });
         setHelpText(suggestion);
         if (calmMode) {
           setCalmPrompt("Take a breath — here is a gentle reply you can use.");
@@ -149,8 +170,61 @@ export default function Meetings() {
         setHelpLoading(false);
       }
     },
-    [session]
+    [session, incognitoMode, documentBrief, documentFileName]
   );
+
+  const onPdfSelected = useCallback(
+    async (e: ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (!file) return;
+      if (session.isSessionActive) {
+        toast.message("Upload before starting capture", {
+          description: "Document context is prepared once before the meeting. End the session to change the PDF.",
+        });
+        return;
+      }
+      if (!ollamaOk) {
+        toast.error("Ollama must be reachable to summarize the document.");
+        return;
+      }
+      const maxBytes = 40 * 1024 * 1024;
+      if (file.size > maxBytes) {
+        toast.error("PDF is too large (max 40 MB).");
+        return;
+      }
+      setDocumentPrepareBusy(true);
+      setDocumentPrepareLabel("Reading PDF…");
+      try {
+        const text = await extractPdfTextFromFile(file);
+        if (!text.trim()) {
+          toast.error("No text found in this PDF — it may be image-only. Try a text-based PDF.");
+          return;
+        }
+        setDocumentPrepareLabel("Summarizing...");
+        const { context } = await postPrepareDocument(text, file.name);
+        if (!context.trim()) {
+          toast.error("Could not build document notes — try again.");
+          return;
+        }
+        setDocumentBrief(context);
+        setDocumentFileName(file.name);
+        toast.success("Document ready — Help / Calm will use the summary only (faster).");
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Could not prepare document");
+      } finally {
+        setDocumentPrepareBusy(false);
+        setDocumentPrepareLabel("");
+      }
+    },
+    [session.isSessionActive, ollamaOk]
+  );
+
+  const clearReferencePdf = useCallback(() => {
+    if (session.isSessionActive) return;
+    setDocumentBrief("");
+    setDocumentFileName(null);
+  }, [session.isSessionActive]);
 
   const runHelpRef = useRef(runHelp);
   runHelpRef.current = runHelp;
@@ -349,6 +423,66 @@ export default function Meetings() {
               />
             </div>
 
+            {!incognitoMode && (
+              <div className="rounded-lg border border-border/60 bg-muted/35 px-3 py-3 space-y-2">
+                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                  <div className="space-y-1 pr-2">
+                    <span className="text-sm font-medium flex items-center gap-2">
+                      <FileText className="h-4 w-4 text-muted-foreground" />
+                      Reference PDF (optional)
+                    </span>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      <strong>Before</strong> you start capture: upload a PDF. Text is read in your browser, then Ollama builds a <strong>short summary once</strong>. During the meeting, only that summary is sent with each Help / Calm request (not the full file). Change or remove the PDF only while capture is stopped. Image-only PDFs may not yield text.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <input
+                      ref={pdfInputRef}
+                      type="file"
+                      accept="application/pdf,.pdf"
+                      className="hidden"
+                      disabled={session.isSessionActive || documentPrepareBusy}
+                      onChange={(ev) => void onPdfSelected(ev)}
+                    />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      className="gap-2"
+                      disabled={session.isSessionActive || documentPrepareBusy || !ollamaOk}
+                      onClick={() => pdfInputRef.current?.click()}
+                      aria-label="Upload a PDF to summarize once before the meeting"
+                    >
+                      {documentPrepareBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+                      {documentPrepareBusy ? documentPrepareLabel || "Working…" : "Upload PDF"}
+                    </Button>
+                    {documentFileName && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={session.isSessionActive || documentPrepareBusy}
+                        onClick={clearReferencePdf}
+                      >
+                        Remove
+                      </Button>
+                    )}
+                  </div>
+                </div>
+                {!ollamaOk && health && (
+                  <p className="text-xs text-amber-700 dark:text-amber-400">Ollama must be reachable to prepare a document.</p>
+                )}
+                {documentFileName && (
+                  <p className="text-xs text-muted-foreground">
+                    Prepared: <span className="font-medium text-foreground">{documentFileName}</span>
+                    {" · "}
+                    {Math.min(documentBrief.length, HELP_DOCUMENT_SEND_MAX).toLocaleString()} characters of notes per Help request
+                    {documentBrief.length > HELP_DOCUMENT_SEND_MAX ? " (capped)" : ""}
+                  </p>
+                )}
+              </div>
+            )}
+
             {session.lastError && (
               <p className="text-sm text-destructive">{session.lastError}</p>
             )}
@@ -485,6 +619,9 @@ export default function Meetings() {
               </p>
               <p>
                 <strong>Incognito</strong> skips the database and recording file; after you end, copy the summary from the page — then dismiss to clear it from the UI.
+              </p>
+              <p>
+                <strong>Reference PDF</strong> (normal mode): upload <strong>before</strong> capture; the app summarizes it once and reuses that brief for faster Help / Calm.
               </p>
               <p className="flex items-center gap-1 text-nest-mint-foreground">
                 <Download className="h-3 w-3 shrink-0" />

@@ -21,11 +21,46 @@ export async function apiHealth(): Promise<{
   return r.json();
 }
 
-export async function postHelp(transcript: string, calmMode = false): Promise<{ suggestion: string }> {
+export type PostHelpOptions = {
+  /** Pre-summarized PDF notes (normal mode); small brief from prepare-document, not raw PDF text. */
+  documentContext?: string;
+  documentName?: string;
+};
+
+const PREPARE_DOCUMENT_TEXT_MAX = 150_000;
+
+/** One-time: send raw extracted PDF text; returns a short brief for repeated Help/Calm calls. */
+export async function postPrepareDocument(text: string, fileName?: string): Promise<{ context: string }> {
+  const r = await fetch("/api/ai/prepare-document", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text: text.slice(0, PREPARE_DOCUMENT_TEXT_MAX),
+      fileName: fileName?.slice(0, 240),
+    }),
+  });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new Error((j as { error?: string }).error || r.statusText);
+  }
+  return r.json();
+}
+
+export async function postHelp(
+  transcript: string,
+  calmMode = false,
+  options?: PostHelpOptions
+): Promise<{ suggestion: string }> {
+  const documentContext = options?.documentContext?.trim() || "";
+  const documentName = (options?.documentName || "Reference document").slice(0, 240);
   const r = await fetch("/api/ai/help", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ transcript, calmMode }),
+    body: JSON.stringify({
+      transcript,
+      calmMode,
+      ...(documentContext ? { documentContext, documentName } : {}),
+    }),
   });
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));
