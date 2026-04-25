@@ -12,7 +12,6 @@ import {
   Loader2,
   Mic,
   MicOff,
-  MonitorPlay,
   Sparkles,
   Video,
   Zap,
@@ -67,7 +66,6 @@ function formatIncognitoCopy(o: IncognitoOutcome): string {
 
 export default function Meetings() {
   const queryClient = useQueryClient();
-  const screenRef = useRef<HTMLVideoElement>(null);
   const cameraRef = useRef<HTMLVideoElement>(null);
 
   const [meetingTitle, setMeetingTitle] = useState("Meeting");
@@ -103,13 +101,9 @@ export default function Meetings() {
   const attachStreams = useCallback(async () => {
     try {
       setIncognitoOutcome(null);
-      const { displayStream, micStream } = await session.startSession({ recordMeeting: !incognitoMode });
-      if (screenRef.current) {
-        screenRef.current.srcObject = displayStream;
-        await screenRef.current.play().catch(() => undefined);
-      }
+      const { mediaStream } = await session.startSession({ recordMeeting: !incognitoMode });
       if (cameraRef.current) {
-        cameraRef.current.srcObject = micStream;
+        cameraRef.current.srcObject = mediaStream;
         await cameraRef.current.play().catch(() => undefined);
       }
       setStartedAtIso(new Date().toISOString());
@@ -118,7 +112,7 @@ export default function Meetings() {
       if (incognitoMode) {
         toast.success("Incognito capture started — nothing will be saved to the database.");
       } else {
-        toast.success("Capture started — pick Meet tab + enable tab audio if prompted.");
+        toast.success("Capture started — camera, mic, and transcript (Chrome).");
       }
     } catch {
       /* startSession sets lastError */
@@ -126,7 +120,6 @@ export default function Meetings() {
   }, [session, incognitoMode]);
 
   const detachVideos = useCallback(() => {
-    if (screenRef.current) screenRef.current.srcObject = null;
     if (cameraRef.current) cameraRef.current.srcObject = null;
   }, []);
 
@@ -270,7 +263,7 @@ export default function Meetings() {
       <div>
         <h2 className="font-heading text-2xl font-bold text-foreground">Meeting Copilot</h2>
         <p className="text-sm text-muted-foreground mt-0.5">
-          Capture Meet tab + camera/mic, live transcript, and AI help via Ollama. <strong>Normal</strong> mode saves summaries and recordings to your setup;{" "}
+          Camera and microphone only (no screen share) for a lighter session: live transcript and AI help via Ollama. <strong>Normal</strong> mode saves summaries and a WebM of your camera+mic;{" "}
           <strong>Incognito</strong> keeps nothing in the database — you only get an on-screen summary to copy.
         </p>
       </div>
@@ -302,11 +295,11 @@ export default function Meetings() {
         <Card className="lg:col-span-2 nest-shadow-card border-border/60">
           <CardHeader className="pb-3">
             <CardTitle className="font-heading text-lg flex items-center gap-2">
-              <MonitorPlay className="h-5 w-5 text-primary" />
+              <Video className="h-5 w-5 text-primary" />
               Live capture
             </CardTitle>
             <CardDescription>
-              Start → choose the Google Meet <strong>Chrome tab</strong> and enable <strong>Share tab audio</strong>. Your camera preview runs a local mood estimate (face expressions → stress score, smoothed). When stress stays above the threshold, <strong>Calm down &amp; suggest reply</strong> runs automatically if there is transcript.
+              Start → allow <strong>camera and microphone</strong>. Transcript uses Chrome&apos;s Web Speech API (your voice; use speakers or a meeting bridge if others should appear in text). The preview runs a local mood estimate (face expressions → stress score). When stress stays high, <strong>Calm down &amp; suggest reply</strong> can run automatically if there is transcript.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -360,17 +353,11 @@ export default function Meetings() {
               <p className="text-sm text-destructive">{session.lastError}</p>
             )}
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div className="rounded-xl overflow-hidden bg-muted aspect-video border border-border/50 relative">
-                <video ref={screenRef} className="w-full h-full object-contain bg-black" playsInline muted />
-                <span className="absolute bottom-2 left-2 text-[10px] uppercase tracking-wider bg-black/60 text-white px-2 py-0.5 rounded-md">
-                  Screen / Meet
-                </span>
-              </div>
+            <div className="max-w-2xl mx-auto w-full">
               <div className="rounded-xl overflow-hidden bg-muted aspect-video border border-border/50 relative">
                 <video ref={cameraRef} className="w-full h-full object-cover bg-black" playsInline muted />
                 <span className="absolute bottom-2 left-2 text-[10px] uppercase tracking-wider bg-black/60 text-white px-2 py-0.5 rounded-md flex items-center gap-1">
-                  <Video className="h-3 w-3" /> You
+                  <Video className="h-3 w-3" /> Camera + mic
                 </span>
                 {session.isSessionActive && (
                   <div className="absolute top-2 right-2 max-w-[min(100%,14rem)] text-right space-y-1">
@@ -408,7 +395,7 @@ export default function Meetings() {
                   <span className="h-2 w-2 rounded-full bg-green-500 animate-focus-pulse" />
                   <Headphones className="h-4 w-4" />
                   Listening — transcript builds locally (Chrome speech).
-                  {incognitoMode ? " Incognito: mixed tab+mic recording is off." : " Recording includes tab + mic audio."}
+                  {incognitoMode ? " Incognito: no recording file." : " Recording is camera + microphone only."}
                 </div>
               )}
               {!session.speechSupported && (
@@ -488,7 +475,7 @@ export default function Meetings() {
             </CardTitle>
             <CardDescription className="space-y-2 text-xs leading-relaxed">
               <p>
-                <strong>Recording</strong> mixes Meet tab audio with your microphone via a small in-browser audio graph.
+                <strong>Recording</strong> is a single WebM from your camera and microphone (no screen or tab capture).
               </p>
               <p>
                 <strong>Transcript</strong> uses the Web Speech API in Chrome (sends audio to Google&apos;s speech service). For a fully local pipeline, swap in Whisper later.

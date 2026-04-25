@@ -6,19 +6,19 @@ This app has a **Vite + React** frontend and a small **Node (Express) + PostgreS
 
 | Piece | Role |
 |--------|------|
-| Frontend (`npm run dev`) | Screen + tab audio via `getDisplayMedia`, camera/mic via `getUserMedia`, merged recording, live transcript (Chrome Web Speech API), Help / Calm actions |
+| Frontend (`npm run dev`) | Camera + microphone via `getUserMedia` (no screen capture), WebM recording from that stream, live transcript (Chrome Web Speech API), Help / Calm actions |
 | API (`server/`, port `3001`) | Health check, Ollama prompts, Postgres persistence for meetings |
 | Ollama | LLM for “what should I say?” and structured meeting summary (JSON) |
 | PostgreSQL | Stores transcript, summary, decisions, and action items per meeting |
 
-**Note:** Live transcription uses the **browser’s speech recognition** (in Chrome, this uses Google’s speech service). The **recording** is local WebM (tab audio + your mic). For a fully offline transcript later, you can add Whisper or another STT service and replace the speech layer only.
+**Note:** Live transcription uses the **browser’s speech recognition** (in Chrome, this uses Google’s speech service). The **recording** is local WebM (camera + your mic). For a fully offline transcript later, you can add Whisper or another STT service and replace the speech layer only.
 
 ## Prerequisites
 
 - **Node.js** 18+ (for `fetch` in the API and `node --watch`)
 - **PostgreSQL** 14+ (with `pgcrypto` for `gen_random_uuid`)
 - **Ollama** installed and a model pulled (e.g. `llama3.2`)
-- **Chrome** (recommended) for screen/tab capture + speech recognition
+- **Chrome** (recommended) for speech recognition and media capture
 
 ## 1. Install dependencies
 
@@ -120,12 +120,11 @@ The Vite dev server **proxies `/api`** to the API, so the browser calls `/api/..
 1. Open **Meetings**.
 2. Confirm the green/amber **Backend** banner shows database **connected** and Ollama **reachable**.
 3. Enter a **Meeting title**, click **Start capture**.
-4. In the browser picker, choose the **Chrome tab** that has Google Meet (or entire screen if you prefer) and enable **Share tab audio** when offered.
-5. Allow **camera** and **microphone** when prompted (used for your preview, mic mixed into the recording).
-6. Speak normally; **Transcript** fills via Chrome speech recognition.
-7. **Help — what should I say?** sends the recent transcript to Ollama for a reply suggestion.
-8. **Calm down & suggest reply** (or **Demo: stress trigger**) uses the same endpoint with a calmer system prompt — your future **video mood model** should call the same flow when stress is detected.
-9. **End & save** stops capture, asks Ollama for a **summary + decisions + tasks**, saves a row in Postgres, and **downloads** the WebM recording.
+4. Allow **camera** and **microphone** when prompted (one stream for preview, recording, and speech).
+5. Speak normally; **Transcript** fills via Chrome speech recognition (typically your voice; others in the room only if the mic picks them up).
+6. **Help — what should I say?** sends the recent transcript to Ollama for a reply suggestion.
+7. **Calm down & suggest reply** (or **Demo: stress trigger**) uses the same endpoint with a calmer system prompt; live **stress** from the camera can trigger Calm automatically when transcript exists.
+8. **End & save** stops capture, asks Ollama for a **summary + decisions + tasks**, saves a row in Postgres, and **downloads** the WebM recording (camera + mic).
 
 ## 7. Adding a real-time mood / stress trigger (optional)
 
@@ -141,7 +140,7 @@ The UI reserves **your camera** preview and documents where to hook in:
 | Backend banner shows DB disconnected | `DATABASE_URL`, Postgres running, `init.sql` applied |
 | Ollama unreachable | `ollama serve`, firewall, `OLLAMA_URL` |
 | Empty transcript | Use Chrome; allow mic; some browsers lack `webkitSpeechRecognition` |
-| No tab audio | Re-share and check **Share tab audio**; prefer Meet **tab** capture |
+| Transcript drops or stutters | Close other heavy tabs; Chrome restarts speech after pauses — keep speaking or check CPU load from other apps |
 | Model errors | `ollama list`, match `OLLAMA_MODEL` exactly |
 
 ## 9. Production notes (out of scope for hackathon)

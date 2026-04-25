@@ -1,5 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 
+type SpeechRecognitionErrorEvent = Event & { error: string };
+
 type SpeechRecognitionType = new () => {
   continuous: boolean;
   interimResults: boolean;
@@ -7,7 +9,7 @@ type SpeechRecognitionType = new () => {
   start: () => void;
   stop: () => void;
   onresult: ((ev: Event & { resultIndex: number; results: SpeechRecognitionResultList }) => void) | null;
-  onerror: ((ev: Event) => void) | null;
+  onerror: ((ev: SpeechRecognitionErrorEvent) => void) | null;
   onend: (() => void) | null;
 };
 
@@ -28,16 +30,14 @@ function pickRecorderMime(): string {
   return "";
 }
 
+/** One combined camera + microphone stream (no tab/screen capture — much lighter on CPU/GPU). */
 export type StartSessionOptions = {
-  /** When false (e.g. incognito), no mixed recording is captured — less confidential audio retained in memory. */
+  /** When false (e.g. incognito), no MediaRecorder — less work on the main thread. */
   recordMeeting?: boolean;
 };
 
 export function useMeetingSession() {
-  const displayStreamRef = useRef<MediaStream | null>(null);
-  const micStreamRef = useRef<MediaStream | null>(null);
-  const mergedStreamRef = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const recognitionRef = useRef<InstanceType<SpeechRecognitionType> | null>(null);
@@ -46,11 +46,14 @@ export function useMeetingSession() {
   const transcriptRef = useRef("");
   const [transcript, setTranscript] = useState("");
   const [interim, setInterim] = useState("");
-  const interimThrottleRef = useRef<number | null>(null);
+  const interimRafRef = useRef<number | null>(null);
   const latestInterimRef = useRef("");
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(true);
   const [lastError, setLastError] = useState<string | null>(null);
+
+  /** After benign Web Speech errors, wait longer before restart so Chrome does not stutter. */
+  const speechRestartDelayRef = useRef(380);
 
   const appendFinal = useCallback((text: string) => {
     const piece = text.trim();
@@ -59,6 +62,19 @@ export function useMeetingSession() {
     transcriptRef.current = next;
     setTranscript(next);
   }, []);
+
+  const flushInterimToState = useCallback(() => {
+    interimRafRef.current = null;
+    setInterim(latestInterimRef.current);
+  }, []);
+
+  const scheduleInterimFlush = useCallback(() => {
+    if (interimRafRef.current != null) return;
+    interimRafRef.current = window.requestAnimationFrame(() => {
+      interimRafRef.current = null;
+      flushInterimToState();
+    });
+  }, [flushInterimToState]);
 
   const stopSpeech = useCallback(() => {
     const r = recognitionRef.current;
@@ -82,8 +98,12 @@ export function useMeetingSession() {
     const recognition = new Ctor();
     recognition.continuous = true;
     recognition.interimResults = true;
+    if ("maxAlternatives" in recognition) {
+      (recognition as { maxAlternatives: number }).maxAlternatives = 1;
+    }
     recognition.lang = navigator.language || "en-US";
     recognition.onresult = (event) => {
+      speechRestartDelayRef.current = 380;
       let interimText = "";
       let finalText = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -93,9 +113,9 @@ export function useMeetingSession() {
         else interimText += chunk;
       }
       if (finalText) {
-        if (interimThrottleRef.current != null) {
-          window.clearTimeout(interimThrottleRef.current);
-          interimThrottleRef.current = null;
+        if (interimRafRef.current != null) {
+          window.cancelAnimationFrame(interimRafRef.current);
+          interimRafRef.current = null;
         }
         latestInterimRef.current = "";
         appendFinal(finalText);
@@ -103,31 +123,36 @@ export function useMeetingSession() {
         return;
       }
       latestInterimRef.current = interimText.trim();
-      if (interimThrottleRef.current != null) window.clearTimeout(interimThrottleRef.current);
-      interimThrottleRef.current = window.setTimeout(() => {
-        interimThrottleRef.current = null;
-        setInterim(latestInterimRef.current);
-      }, 110);
+      scheduleInterimFlush();
     };
-    recognition.onerror = () => {
-      if (interimThrottleRef.current != null) {
-        window.clearTimeout(interimThrottleRef.current);
-        interimThrottleRef.current = null;
+    recognition.onerror = (event) => {
+      const code = event.error;
+      if (code === "not-allowed") {
+        setLastError("Speech recognition blocked — allow microphone for this site in the address bar.");
+        speechRestartDelayRef.current = 2500;
+        return;
+      }
+      if (code === "no-speech" || code === "audio-capture" || code === "network") {
+        speechRestartDelayRef.current = Math.min(Math.round(speechRestartDelayRef.current * 1.35), 2800);
+      }
+      if (interimRafRef.current != null) {
+        window.cancelAnimationFrame(interimRafRef.current);
+        interimRafRef.current = null;
       }
       latestInterimRef.current = "";
       setInterim("");
     };
     recognition.onend = () => {
-      if (sessionActiveRef.current && recognitionRef.current === recognition) {
-        window.setTimeout(() => {
-          if (!sessionActiveRef.current || recognitionRef.current !== recognition) return;
-          try {
-            recognition.start();
-          } catch {
-            /* ignore */
-          }
-        }, 120);
-      }
+      if (!sessionActiveRef.current || recognitionRef.current !== recognition) return;
+      const delay = speechRestartDelayRef.current;
+      window.setTimeout(() => {
+        if (!sessionActiveRef.current || recognitionRef.current !== recognition) return;
+        try {
+          recognition.start();
+        } catch {
+          speechRestartDelayRef.current = Math.min(Math.round(speechRestartDelayRef.current * 1.5), 3200);
+        }
+      }, delay);
     };
     recognitionRef.current = recognition;
     try {
@@ -135,101 +160,71 @@ export function useMeetingSession() {
     } catch {
       /* ignore */
     }
-  }, [appendFinal]);
+  }, [appendFinal, scheduleInterimFlush]);
 
-  const startSession = useCallback(async (options?: StartSessionOptions) => {
-    const recordMeeting = options?.recordMeeting !== false;
+  const startSession = useCallback(
+    async (options?: StartSessionOptions) => {
+      const recordMeeting = options?.recordMeeting !== false;
 
-    setLastError(null);
-    transcriptRef.current = "";
-    setTranscript("");
-    setInterim("");
+      setLastError(null);
+      transcriptRef.current = "";
+      setTranscript("");
+      setInterim("");
+      speechRestartDelayRef.current = 380;
 
-    let display: MediaStream;
-    try {
-      display = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: true,
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Screen capture was cancelled or failed.";
-      setLastError(msg);
-      throw e;
-    }
-
-    let mic: MediaStream;
-    try {
-      mic = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    } catch (e) {
-      display.getTracks().forEach((t) => t.stop());
-      const msg = e instanceof Error ? e.message : "Camera/microphone permission denied.";
-      setLastError(msg);
-      throw e;
-    }
-
-    displayStreamRef.current = display;
-    micStreamRef.current = mic;
-
-    if (recordMeeting) {
-      const ctx = new AudioContext();
-      audioContextRef.current = ctx;
+      let stream: MediaStream;
       try {
-        await ctx.resume();
-      } catch {
-        /* ignore */
-      }
-      const dest = ctx.createMediaStreamDestination();
-
-      const dAudio = display.getAudioTracks();
-      if (dAudio.length) {
-        try {
-          ctx.createMediaStreamSource(new MediaStream(dAudio)).connect(dest);
-        } catch {
-          /* ignore */
-        }
-      }
-      const mAudio = mic.getAudioTracks();
-      if (mAudio.length) {
-        try {
-          ctx.createMediaStreamSource(new MediaStream(mAudio)).connect(dest);
-        } catch {
-          /* ignore */
-        }
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: "user",
+            width: { ideal: 640, max: 960 },
+            height: { ideal: 480, max: 540 },
+            frameRate: { ideal: 15, max: 24 },
+          },
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Camera/microphone permission denied.";
+        setLastError(msg);
+        throw e;
       }
 
-      const videoTracks = display.getVideoTracks();
-      const merged = new MediaStream([...videoTracks, ...dest.stream.getAudioTracks()]);
-      mergedStreamRef.current = merged;
+      mediaStreamRef.current = stream;
 
-      chunksRef.current = [];
-      const mime = pickRecorderMime();
-      const rec = mime ? new MediaRecorder(merged, { mimeType: mime }) : new MediaRecorder(merged);
-      recorderRef.current = rec;
-      rec.ondataavailable = (e) => {
-        if (e.data.size) chunksRef.current.push(e.data);
-      };
-      /* Larger timeslice = fewer main-thread churn events while recording (smoother tab + speech). */
-      rec.start(4000);
-    } else {
-      audioContextRef.current = null;
-      mergedStreamRef.current = null;
-      recorderRef.current = null;
-      chunksRef.current = [];
-    }
+      if (recordMeeting) {
+        chunksRef.current = [];
+        const mime = pickRecorderMime();
+        const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+        recorderRef.current = rec;
+        rec.ondataavailable = (e) => {
+          if (e.data.size) chunksRef.current.push(e.data);
+        };
+        /* Larger slice = fewer main-thread events (smoother with speech + face sampling). */
+        rec.start(6000);
+      } else {
+        recorderRef.current = null;
+        chunksRef.current = [];
+      }
 
-    sessionActiveRef.current = true;
-    setIsSessionActive(true);
-    startSpeech();
+      sessionActiveRef.current = true;
+      setIsSessionActive(true);
+      startSpeech();
 
-    return { displayStream: display, micStream: mic };
-  }, [startSpeech]);
+      return { mediaStream: stream };
+    },
+    [startSpeech]
+  );
 
   const stopSession = useCallback(async () => {
     sessionActiveRef.current = false;
     stopSpeech();
-    if (interimThrottleRef.current != null) {
-      window.clearTimeout(interimThrottleRef.current);
-      interimThrottleRef.current = null;
+    if (interimRafRef.current != null) {
+      window.cancelAnimationFrame(interimRafRef.current);
+      interimRafRef.current = null;
     }
     latestInterimRef.current = "";
     setInterim("");
@@ -255,18 +250,8 @@ export function useMeetingSession() {
       }
     });
 
-    displayStreamRef.current?.getTracks().forEach((t) => t.stop());
-    micStreamRef.current?.getTracks().forEach((t) => t.stop());
-    displayStreamRef.current = null;
-    micStreamRef.current = null;
-    mergedStreamRef.current = null;
-
-    try {
-      await audioContextRef.current?.close();
-    } catch {
-      /* ignore */
-    }
-    audioContextRef.current = null;
+    mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
+    mediaStreamRef.current = null;
 
     setIsSessionActive(false);
     const text = transcriptRef.current;

@@ -17,6 +17,10 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "12mb" }));
 
+function httpErrorMessage(e) {
+  return e instanceof Error ? e.message : String(e ?? "Unknown error");
+}
+
 async function ensureDb() {
   if (!pool) {
     return { ok: false, error: "DATABASE_URL is not set" };
@@ -25,7 +29,7 @@ async function ensureDb() {
     await pool.query("SELECT 1");
     return { ok: true };
   } catch (e) {
-    return { ok: false, error: e.message };
+    return { ok: false, error: httpErrorMessage(e) };
   }
 }
 
@@ -39,12 +43,20 @@ async function ollamaChat(messages) {
       stream: false,
     }),
   });
+  const textBody = await res.text();
   if (!res.ok) {
-    const t = await res.text();
-    throw new Error(`Ollama error ${res.status}: ${t}`);
+    throw new Error(`Ollama error ${res.status}: ${textBody.slice(0, 2000)}`);
   }
-  const data = await res.json();
-  return data.message?.content?.trim() || "";
+  let data;
+  try {
+    data = JSON.parse(textBody);
+  } catch {
+    throw new Error(`Ollama returned non-JSON: ${textBody.slice(0, 500)}`);
+  }
+  const raw = data?.message?.content;
+  if (typeof raw === "string") return raw.trim();
+  if (raw == null || raw === "") return "";
+  return String(raw).trim();
 }
 
 function stripMarkdownCodeFence(text) {
@@ -224,7 +236,7 @@ app.post("/api/ai/help", async (req, res) => {
     ]);
     res.json({ suggestion: content });
   } catch (e) {
-    res.status(502).json({ error: e.message || "Ollama request failed" });
+    res.status(502).json({ error: httpErrorMessage(e) || "Ollama request failed" });
   }
 });
 
@@ -254,7 +266,7 @@ Transcript:\n---\n${transcript}\n---`;
 
     res.json({ summary, decisions, actionItems });
   } catch (e) {
-    res.status(502).json({ error: e.message || "Ollama request failed" });
+    res.status(502).json({ error: httpErrorMessage(e) || "Ollama request failed" });
   }
 });
 
@@ -267,7 +279,7 @@ app.get("/api/meetings", async (_req, res) => {
     );
     res.json(rows);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: httpErrorMessage(e) });
   }
 });
 
@@ -278,7 +290,7 @@ app.get("/api/meetings/:id", async (req, res) => {
     if (!rows[0]) return res.status(404).json({ error: "not found" });
     res.json(rows[0]);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: httpErrorMessage(e) });
   }
 });
 
@@ -289,7 +301,7 @@ app.delete("/api/meetings/:id", async (req, res) => {
     if (!rowCount) return res.status(404).json({ error: "not found" });
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: httpErrorMessage(e) });
   }
 });
 
@@ -312,7 +324,7 @@ app.post("/api/meetings", async (req, res) => {
     );
     res.json(rows[0]);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: httpErrorMessage(e) });
   }
 });
 

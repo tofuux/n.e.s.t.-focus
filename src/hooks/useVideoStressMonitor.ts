@@ -24,7 +24,7 @@ export function useVideoStressMonitor({
   enabled,
   stressThreshold = 0.3,
   windowSize = 10,
-  sampleIntervalMs = 1600,
+  sampleIntervalMs = 2200,
   minSamplesForTrigger = 5,
   cooldownMs = 75_000,
   onHighStress,
@@ -83,11 +83,12 @@ export function useVideoStressMonitor({
     if (!faceapi) return;
 
     const detectorOpts = new faceapi.TinyFaceDetectorOptions({
-      inputSize: 224,
+      inputSize: 160,
       scoreThreshold: 0.5,
     });
 
     const tick = async () => {
+      if (typeof document !== "undefined" && document.hidden) return;
       if (busy) return;
       const video = videoRef.current;
       const fa = faceapiRef.current;
